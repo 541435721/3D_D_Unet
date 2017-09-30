@@ -18,7 +18,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 CLASSES = 2
 path1 = '/home/bxsh/Data/out.vtk'
 path2 = '/home/bxsh/Data/liver'
-BLOCK_SIZE = [32, 256, 256]
+BLOCK_SIZE = [64, 256, 256]
 path = '/home/bxsh/Liver_data'
 
 
@@ -157,7 +157,7 @@ with g.as_default():
     steps = 1000
     g_steps = tf.Variable(0)
 
-    rates = tf.train.exponential_decay(0.2, g_steps, 200, 0.95, staircase=True)
+    rates = tf.train.exponential_decay(0.01, g_steps, 200, 0.95, staircase=True)
     # train = tf.train.GradientDescentOptimizer(rates).minimize(loss, global_step=g_steps)
     train = tf.train.MomentumOptimizer(
         learning_rate=rates, momentum=0.2).minimize(loss=loss, global_step=g_steps)
@@ -175,25 +175,62 @@ def read_dcm(names, raw=False):
         img = sitk.ReadImage(names)
     return sitk.GetArrayFromImage(img)
 
-blocksize=8
+
+data = Data(path, BLOCK_SIZE)
 if __name__ == '__main__':
     with tf.Session(graph=g) as sess:
         saver = tf.train.Saver()
-        saver.restore(sess, './test_model_save/test.ckpt')
-        Train_Data = read_dcm(path1,True)
-        Train_Data = Train_Data.reshape([1] + list(Train_Data.shape) + [1])
-        Label_Data = read_dcm(path2)
-        Label_Data = Label_Data.reshape([1] + list(Label_Data.shape)) / 255.0
-        prediction = np.zeros_like(Label_Data)
-        for i in range(0, Train_Data.shape[1]-blocksize, blocksize):
-            print(i)
-            x = Train_Data[:,i:i + blocksize,...]
-            y = Train_Data[:,i:i + blocksize,...]
-            pre = sess.run(pre_img, feed_dict={X: x})
-            prediction[:,i:i + blocksize,...] = pre
-        seg = np.squeeze(prediction)
-        img=sitk.GetImageFromArray(seg)
-        sitk.WriteImage(img,'out.vtk')
-			
+        saver.restore(sess, './test_model_save_3/test.ckpt')
+        key = 0.0045  # 0.005
+        sess.run(tf.assign(g_steps, 0))
+        summary_writer = tf.summary.FileWriter('./summary', graph=sess.graph)
+        w = [0.1, 0.2, 0.3, 0.4]
+        ans3 = 1000
+        # cv2.imwrite('./prediction/test_.jpg', np.uint8(
+        # (pic[0, :, :, 0] < pic[0, :, :, 1])) * 255)
+        count = 0
+        iteration = 0
+        while iteration < 100000:
+            try:
+                try:
+                    x, y = data.next()
+                except Exception as e:
+                    data = Data(path, BLOCK_SIZE)
+                    x, y = data.next()
 
-        
+                flat = y.flatten().tolist()
+
+                portion = sum(flat) * 1.0 / (len(flat) - sum(flat))
+
+                # if portion < 0.1:
+                #     continue
+                iteration += 1
+                w = [1, 1, 0.05 * (0.99 ** (iteration // 200)),  # [portion,1]
+                     0.06 * (0.99 ** (iteration // 200))]
+
+                ans1, ans2, ans3, ans4 = sess.run(
+                    [loss, acc, rates, merged], feed_dict={X: x, Y: y, W: w})
+                sess.run(train, feed_dict={X: x, Y: y, W: w})
+                if iteration % 100 == 0:
+                    count += 1
+                    summary_writer.add_summary(ans4, count)
+
+                print(
+                    "Iteration:{0},loss:{1},acc:{2},rates:{3},weight:{4}".format(str(iteration),
+                                                                                 ans1,
+                                                                                 ans2, ans3, w))
+                pic = sess.run(pre_img, feed_dict={X: x, Y: y, W: w})
+                cv2.imwrite(
+                    './prediction/pre_' + str(iteration) + '.jpg',
+                    np.uint8(pic[0, 0, ...]) * 255)
+            except Exception as e:
+                print("出现异常，保存模型")
+                saver.save(sess, './test_model_save/test' + str(iteration) + '.ckpt')
+
+            if iteration % 1000 == 0:
+                saver.save(sess, './test_model_save/test' + str(iteration) + '.ckpt')
+
+            if ans3 - 0 < 0.00001:
+                break
+
+        saver.save(sess, './test_model_save/test.ckpt')
